@@ -107,6 +107,26 @@ function isLoopbackOrigin(value) {
   }
 }
 
+export function normalizeHost(value) {
+  const host = typeof value === "string" ? value.trim() : "";
+
+  if (!host) {
+    return DEFAULT_HOST;
+  }
+
+  const normalizedHost = normalizeLoopbackHost(host);
+
+  if (
+    normalizedHost === "localhost" ||
+    normalizedHost === "127.0.0.1" ||
+    normalizedHost === "::1"
+  ) {
+    return normalizedHost;
+  }
+
+  throw new Error(`Unsafe HOST: ${host}`);
+}
+
 function requireLocalSessionRequest(req, res, next) {
   if (
     !isLoopbackHost(req.headers.host) ||
@@ -197,7 +217,7 @@ export function createApp({
 
 if (process.argv[1] === __filename) {
   const port = Number(process.env.PORT ?? 3000);
-  const host = process.env.HOST ?? DEFAULT_HOST;
+  const host = normalizeHost(process.env.HOST);
   const app = createApp();
 
   app.listen(port, host, () => {

@@ -6,6 +6,7 @@ import {
   DEFAULT_HOST,
   OPENAI_TRANSLATION_CLIENT_SECRETS_URL,
   createApp,
+  normalizeHost,
   normalizeTargetLanguage,
 } from "../server.js";
 
@@ -69,6 +70,29 @@ function requestJson(
 
 test("direct startup defaults to loopback host", () => {
   assert.equal(DEFAULT_HOST, "127.0.0.1");
+});
+
+test("normalizeHost defaults blank values to the default host", () => {
+  assert.equal(normalizeHost(undefined), DEFAULT_HOST);
+  assert.equal(normalizeHost(""), DEFAULT_HOST);
+  assert.equal(normalizeHost("   "), DEFAULT_HOST);
+});
+
+test("normalizeHost accepts loopback bind hosts", () => {
+  assert.equal(normalizeHost("localhost"), "localhost");
+  assert.equal(normalizeHost("127.0.0.1"), "127.0.0.1");
+  assert.equal(normalizeHost("::1"), "::1");
+});
+
+test("normalizeHost rejects non-loopback bind hosts", () => {
+  assert.throws(
+    () => normalizeHost("0.0.0.0"),
+    /Unsafe HOST: 0\.0\.0\.0/
+  );
+  assert.throws(
+    () => normalizeHost("192.168.1.20"),
+    /Unsafe HOST: 192\.168\.1\.20/
+  );
 });
 
 test("normalizeTargetLanguage defaults to Korean", () => {
@@ -396,6 +420,59 @@ test("POST /session allows localhost Origin with port", async () => {
       Host: `localhost:${address.port}`,
       Origin: `http://localhost:${address.port}`,
     }),
+    body: {
+      targetLanguage: "ko",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, {
+    value: "client-secret-test",
+    expires_at: 1234567890,
+  });
+});
+
+test("POST /session allows IPv6 localhost Host with port", async () => {
+  const app = createApp({
+    apiKey: "sk-test",
+    fetchImpl: async () =>
+      Response.json({
+        value: "client-secret-test",
+        expires_at: 1234567890,
+      }),
+  });
+
+  const response = await requestJson(app, {
+    headers: {
+      Host: "[::1]:3000",
+    },
+    body: {
+      targetLanguage: "ko",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, {
+    value: "client-secret-test",
+    expires_at: 1234567890,
+  });
+});
+
+test("POST /session allows IPv6 localhost Origin with allowed Host", async () => {
+  const app = createApp({
+    apiKey: "sk-test",
+    fetchImpl: async () =>
+      Response.json({
+        value: "client-secret-test",
+        expires_at: 1234567890,
+      }),
+  });
+
+  const response = await requestJson(app, {
+    headers: {
+      Host: "[::1]:3000",
+      Origin: "http://[::1]:3000",
+    },
     body: {
       targetLanguage: "ko",
     },
