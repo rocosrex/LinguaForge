@@ -107,6 +107,7 @@ test("index page includes realtime translation client hooks", async () => {
     "SILENCE_TIMEOUT_MS",
     "MAX_SESSION_MS",
     "downloadMarkdown",
+    "formatDownloadTimestamp",
     "startSilenceMonitor",
     "stopSession",
   ];
@@ -114,4 +115,33 @@ test("index page includes realtime translation client hooks", async () => {
   for (const token of requiredTokens) {
     assert.match(html, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
+});
+
+test("index page hardens realtime session lifecycle", async () => {
+  const html = await readIndexHtml();
+  const requiredTokens = [
+    "generation",
+    "currentGeneration",
+    "isCurrentGeneration",
+    "AbortController",
+    "abortController.signal",
+    "pc.onconnectionstatechange",
+    "pc.oniceconnectionstatechange",
+    "\"failed\", \"disconnected\", \"closed\"",
+    "handleSessionError",
+    "cleanupStaleStart",
+    "event.type?.includes(\"error\")",
+    "audioContext.state === \"suspended\"",
+    "audioContext.resume()",
+    "formatDownloadTimestamp",
+    "## Translation Transcript",
+  ];
+
+  for (const token of requiredTokens) {
+    assert.match(html, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  assert.doesNotMatch(html, /## Korean Transcript/);
+  assert.doesNotMatch(html, /\.slice\(0,\s*13\)/);
+  assert.match(html, /youtube-translation-\$\{timestamp\}\.md/);
 });

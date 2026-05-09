@@ -258,6 +258,8 @@
       endReason: null,
       transcript: "",
       state: "idle",
+      generation: 0,
+      abortController: null,
     };
 
     function setStatus(message, { active = false, error = false } = {}) {
@@ -318,6 +320,32 @@
       downloadBtn.disabled = session.transcript.trim().length === 0;
     }
 
+    function isCurrentGeneration(currentGeneration) {
+      return session.generation === currentGeneration;
+    }
+
+    function handleSessionError(message) {
+      if (["idle", "ended", "error"].includes(session.state)) {
+        return;
+      }
+
+      session.end = new Date();
+      session.endReason = "error";
+      cleanupResources();
+      updateElapsed();
+      setState("error", `오류: ${message}`);
+    }
+
+    function cleanupStaleStart(currentGeneration, stream) {
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+
+      if (isCurrentGeneration(currentGeneration)) {
+        cleanupResources();
+      }
+    }
+
     function extractTranscriptDelta(event) {
       if (typeof event?.delta !== "string") {
         return "";
@@ -337,6 +365,7 @@
 
         if (event.type?.includes("error")) {
           console.error("Realtime Translation event error", event);
+          handleSessionError(event.error?.message ?? "Realtime Translation 오류가 발생했습니다.");
           return;
         }
 
@@ -370,13 +399,14 @@
       }
     }
 
-    async function createClientSecret(targetLanguage) {
+    async function createClientSecret(targetLanguage, signal) {
       const response = await fetch("/session", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ targetLanguage }),
+        signal,
       });
 
       const data = await response.json().catch(() => ({}));
@@ -393,13 +423,31 @@
       return clientSecret;
     }
 
-    async function connectWebRtc(audioTrack, stream, clientSecret) {
+    async function connectWebRtc(audioTrack, stream, clientSecret, signal) {
       const pc = new RTCPeerConnection();
       session.pc = pc;
 
       pc.addTrack(audioTrack, stream);
       session.events = pc.createDataChannel("oai-events");
       session.events.onmessage = ({ data }) => handleRealtimeEvent(data);
+
+      pc.onconnectionstatechange = () => {
+        if (
+          ["failed", "disconnected", "closed"].includes(pc.connectionState) &&
+          ["connecting", "translating"].includes(session.state)
+        ) {
+          handleSessionError(`WebRTC 연결이 ${pc.connectionState} 상태가 되었습니다.`);
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        if (
+          ["failed", "disconnected", "closed"].includes(pc.iceConnectionState) &&
+          ["connecting", "translating"].includes(session.state)
+        ) {
+          handleSessionError(`WebRTC ICE 연결이 ${pc.iceConnectionState} 상태가 되었습니다.`);
+        }
+      };
 
       pc.ontrack = ({ streams }) => {
         translatedAudio.srcObject = streams[0];
@@ -416,6 +464,7 @@
           "Content-Type": "application/sdp",
         },
         body: offer.sdp,
+        signal,
       });
 
       if (!response.ok) {
@@ -458,8 +507,19 @@
       session.analyserBuffer = new Uint8Array(session.analyser.fftSize);
       session.lastSoundAt = Date.now();
 
+      if (session.audioContext.state === "suspended") {
+        session.audioContext.resume().catch((error) => {
+          console.warn("AudioContext resume failed; silence timeout will wait.", error);
+        });
+      }
+
       clearInterval(session.timers.silence);
       session.timers.silence = setInterval(() => {
+        if (session.audioContext?.state === "suspended") {
+          session.lastSoundAt = Date.now();
+          return;
+        }
+
         session.analyser.getByteTimeDomainData(session.analyserBuffer);
 
         let sum = 0;
@@ -488,12 +548,19 @@
       session.timers.silence = null;
       session.timers.maxSession = null;
 
+      if (session.abortController) {
+        session.abortController.abort();
+        session.abortController = null;
+      }
+
       if (session.events) {
         session.events.close();
         session.events = null;
       }
 
       if (session.pc) {
+        session.pc.onconnectionstatechange = null;
+        session.pc.oniceconnectionstatechange = null;
         session.pc.close();
         session.pc = null;
       }
@@ -531,6 +598,7 @@
         return;
       }
 
+      session.generation += 1;
       session.end = new Date();
       session.endReason = reason;
       cleanupResources();
@@ -539,6 +607,10 @@
     }
 
     async function startSession() {
+      const currentGeneration = session.generation + 1;
+      session.generation = currentGeneration;
+      session.abortController = new AbortController();
+
       setAudioVolumes();
       session.transcript = "";
       session.start = null;
@@ -550,6 +622,12 @@
       try {
         setState("requesting-capture", "탭 오디오 요청 중");
         const captureStream = await captureTabAudio();
+
+        if (!isCurrentGeneration(currentGeneration)) {
+          captureStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
         const audioTrack = captureStream.getAudioTracks()[0];
 
         if (!audioTrack) {
@@ -565,10 +643,28 @@
         audioTrack.onended = () => stopSession("tab-ended");
 
         setState("creating-session", "OpenAI 세션 생성 중");
-        const clientSecret = await createClientSecret(langSelect.value);
+        const clientSecret = await createClientSecret(
+          langSelect.value,
+          session.abortController.signal
+        );
+
+        if (!isCurrentGeneration(currentGeneration)) {
+          cleanupStaleStart(currentGeneration, audioOnlyStream);
+          return;
+        }
 
         setState("connecting", "WebRTC 연결 중");
-        await connectWebRtc(audioTrack, audioOnlyStream, clientSecret);
+        await connectWebRtc(
+          audioTrack,
+          audioOnlyStream,
+          clientSecret,
+          session.abortController.signal
+        );
+
+        if (!isCurrentGeneration(currentGeneration)) {
+          cleanupStaleStart(currentGeneration, audioOnlyStream);
+          return;
+        }
 
         session.start = new Date();
         startElapsedTimer();
@@ -576,6 +672,11 @@
         startSilenceMonitor(audioTrack);
         setState("translating", "통역 중");
       } catch (error) {
+        if (error.name === "AbortError" || !isCurrentGeneration(currentGeneration)) {
+          cleanupStaleStart(currentGeneration);
+          return;
+        }
+
         console.error(error);
         session.end = new Date();
         session.endReason = "error";
@@ -588,6 +689,16 @@
     function formatLocalTimestamp(date) {
       const offsetMs = date.getTimezoneOffset() * 60 * 1000;
       return new Date(date.getTime() - offsetMs).toISOString().slice(0, 19);
+    }
+
+    function formatDownloadTimestamp(date) {
+      const year = String(date.getFullYear());
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      const hours = String(date.getHours()).padStart(2, "0");
+      const minutes = String(date.getMinutes()).padStart(2, "0");
+
+      return `${year}${month}${day}-${hours}${minutes}`;
     }
 
     function buildMarkdown() {
@@ -606,7 +717,7 @@
         `- Target language: ${langSelect.value}`,
         `- End reason: ${reason}`,
         "",
-        "## Korean Transcript",
+        "## Translation Transcript",
         "",
         transcript,
         "",
@@ -615,11 +726,7 @@
 
     function downloadMarkdown() {
       const markdown = buildMarkdown();
-      const timestamp = formatLocalTimestamp(session.start ?? new Date())
-        .replaceAll("-", "")
-        .replace("T", "-")
-        .replaceAll(":", "")
-        .slice(0, 13);
+      const timestamp = formatDownloadTimestamp(session.start ?? new Date());
       const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
