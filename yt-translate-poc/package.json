@@ -1,0 +1,18 @@
+{
+  "name": "yt-translate-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Localhost YouTube realtime translation PoC using OpenAI Realtime Translation over WebRTC.",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
