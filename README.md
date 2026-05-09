@@ -2,9 +2,16 @@
 
 [한국어 README](README.ko.md)
 
+[![Node.js >=20](https://img.shields.io/badge/Node.js-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Localhost proof of concept for live YouTube translation. LinguaForge captures audio from a Chrome tab, sends it to OpenAI Realtime Translation over WebRTC, plays translated audio, renders translated captions, and exports a Markdown transcript.
 
 This repository is a PoC, not a production service. It is intentionally bound to loopback by default and keeps the OpenAI API key on the local server.
+
+Useful search terms: OpenAI Realtime Translation, OpenAI Codex, WebRTC translation, YouTube live translation, Chrome tab audio capture, Korean captions, speech-to-speech translation, AI interpreter, realtime subtitles.
+
+![LinguaForge running on localhost](assets/linguaforge-app.png)
 
 ## What It Does
 
@@ -24,6 +31,16 @@ This repository is a PoC, not a production service. It is intentionally bound to
 - Browser WebRTC APIs
 - OpenAI Realtime Translation
 - Chrome tab audio capture
+
+## Built With Codex
+
+This project was developed with OpenAI Codex as the coding agent. Public environment snapshot for this repository state:
+
+- Agent: Codex, GPT-5-based coding agent
+- Local environment: macOS 26.4.1, `zsh`, Asia/Seoul timezone
+- Runtime checked with: Node.js `v24.7.0`, npm `11.5.1`
+- App runtime: localhost Express server, default port `4000`
+- Repository target: public GitHub project `rocosrex/LinguaForge`
 
 ## Quick Start
 
@@ -95,3 +112,7 @@ Raw YouTube transcript exports are intentionally not tracked in this public repo
 - Custom glossary, fixed voice selection, and custom prompting are not part of this PoC.
 - Browser tests are source-contract tests; full WebRTC behavior still needs manual Chrome testing.
 - Transcript export currently captures translated text only.
+
+## License
+
+MIT

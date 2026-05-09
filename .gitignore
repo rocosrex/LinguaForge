@@ -3,3 +3,4 @@ node_modules/
 .env
 test-output/ObsidianClipper-*.md
 test-output/gpt-realtime-transcript-*.md
+test-output/*.png
