@@ -116,6 +116,30 @@ test("POST /session returns a short-lived OpenAI client secret", async () => {
   });
 });
 
+test("POST /session sanitizes top-level OpenAI client secret responses", async () => {
+  const app = createApp({
+    apiKey: "sk-test",
+    fetchImpl: async () =>
+      Response.json({
+        value: "client-secret-test",
+        expires_at: 1234567890,
+        sensitive_debug_context: "do-not-forward",
+      }),
+  });
+
+  const response = await requestJson(app, {
+    body: {
+      targetLanguage: "ko",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, {
+    value: "client-secret-test",
+    expires_at: 1234567890,
+  });
+});
+
 test("POST /session rejects unsupported target languages before calling OpenAI", async () => {
   let fetchCalled = false;
   const app = createApp({

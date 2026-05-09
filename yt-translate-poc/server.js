@@ -29,7 +29,10 @@ export function normalizeTargetLanguage(value) {
 
 function extractClientSecretPayload(data) {
   if (typeof data?.value === "string") {
-    return data;
+    return {
+      value: data.value,
+      expires_at: data.expires_at,
+    };
   }
 
   if (typeof data?.client_secret?.value === "string") {
