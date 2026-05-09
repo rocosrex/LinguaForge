@@ -93,11 +93,18 @@ export function createApp({
       if (!response.ok) {
         return res.status(response.status).json({
           error: data?.error?.message ?? "OpenAI session creation failed",
-          details: data,
         });
       }
 
-      return res.status(200).json(extractClientSecretPayload(data));
+      const payload = extractClientSecretPayload(data);
+
+      if (typeof payload?.value !== "string") {
+        return res.status(502).json({
+          error: "OpenAI session response did not include a client secret",
+        });
+      }
+
+      return res.status(200).json(payload);
     } catch (error) {
       console.error("Failed to create translation session", error);
       return res.status(502).json({

@@ -178,3 +178,84 @@ test("POST /session forwards OpenAI error status and message", async () => {
   assert.equal(response.status, 401);
   assert.equal(response.body.error, "Invalid API key");
 });
+
+test("POST /session does not expose raw OpenAI error details", async () => {
+  const app = createApp({
+    apiKey: "sk-test",
+    fetchImpl: async () =>
+      Response.json(
+        {
+          error: {
+            message: "Invalid request",
+          },
+          sensitive_debug_context: {
+            upstream_request_id: "req-secret",
+          },
+        },
+        {
+          status: 400,
+        }
+      ),
+  });
+
+  const response = await requestJson(app, {
+    body: {
+      targetLanguage: "ko",
+    },
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(response.body, {
+    error: "Invalid request",
+  });
+});
+
+test("POST /session rejects successful OpenAI responses without a client secret", async () => {
+  const app = createApp({
+    apiKey: "sk-test",
+    fetchImpl: async () => Response.json({}),
+  });
+
+  const response = await requestJson(app, {
+    body: {
+      targetLanguage: "ko",
+    },
+  });
+
+  assert.equal(response.status, 502);
+  assert.deepEqual(response.body, {
+    error: "OpenAI session response did not include a client secret",
+  });
+});
+
+test("POST /session returns a 502 when OpenAI fetch fails", async () => {
+  const originalConsoleError = console.error;
+  let loggedMessage;
+  const app = createApp({
+    apiKey: "sk-test",
+    fetchImpl: async () => {
+      throw new Error("network unavailable");
+    },
+  });
+
+  console.error = (message) => {
+    loggedMessage = message;
+  };
+
+  let response;
+  try {
+    response = await requestJson(app, {
+      body: {
+        targetLanguage: "ko",
+      },
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(response.status, 502);
+  assert.deepEqual(response.body, {
+    error: "Failed to create OpenAI translation session",
+  });
+  assert.equal(loggedMessage, "Failed to create translation session");
+});
