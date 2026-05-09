@@ -11,8 +11,11 @@ const __dirname = path.dirname(__filename);
 
 export const OPENAI_TRANSLATION_CLIENT_SECRETS_URL =
   "https://api.openai.com/v1/realtime/translations/client_secrets";
+export const DEFAULT_HOST = "127.0.0.1";
 
 const ALLOWED_TARGET_LANGUAGES = new Set(["ko", "ja", "zh", "es"]);
+const LOCALHOST_SESSION_ERROR =
+  "Forbidden: /session is only available from localhost";
 
 export function normalizeTargetLanguage(value) {
   const language = typeof value === "string" ? value.trim() : "";
@@ -45,6 +48,78 @@ function extractClientSecretPayload(data) {
   return data;
 }
 
+function normalizeLoopbackHost(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  const host = value.trim().toLowerCase();
+
+  if (!host) {
+    return "";
+  }
+
+  if (host.startsWith("[")) {
+    const closingBracketIndex = host.indexOf("]");
+    const bracketedHost = host.slice(1, closingBracketIndex);
+    const portSuffix = host.slice(closingBracketIndex + 1);
+
+    if (
+      closingBracketIndex > 0 &&
+      (portSuffix === "" || /^:\d+$/.test(portSuffix))
+    ) {
+      return bracketedHost;
+    }
+
+    return "";
+  }
+
+  if (host === "::1" || /^::1:\d+$/.test(host)) {
+    return "::1";
+  }
+
+  const [hostname, port, extra] = host.split(":");
+
+  if (extra !== undefined || (port !== undefined && !/^\d+$/.test(port))) {
+    return "";
+  }
+
+  return hostname;
+}
+
+function isLoopbackHost(value) {
+  return ["localhost", "127.0.0.1", "::1"].includes(
+    normalizeLoopbackHost(value)
+  );
+}
+
+function isLoopbackOrigin(value) {
+  if (typeof value !== "string" || value.trim() === "") {
+    return true;
+  }
+
+  try {
+    const origin = new URL(value);
+
+    return origin.protocol === "http:" && isLoopbackHost(origin.host);
+  } catch {
+    return false;
+  }
+}
+
+function requireLocalSessionRequest(req, res, next) {
+  if (
+    !isLoopbackHost(req.headers.host) ||
+    !isLoopbackOrigin(req.headers.origin)
+  ) {
+    return res.status(403).json({
+      error: LOCALHOST_SESSION_ERROR,
+    });
+  }
+
+  return next();
+}
+
 export function createApp({
   apiKey = process.env.OPENAI_API_KEY,
   fetchImpl = globalThis.fetch,
@@ -52,8 +127,9 @@ export function createApp({
 } = {}) {
   const app = express();
 
-  app.use(express.json({ limit: "16kb" }));
   app.use(express.static(staticDir));
+  app.use("/session", requireLocalSessionRequest);
+  app.use(express.json({ limit: "16kb" }));
 
   app.post("/session", async (req, res) => {
     let targetLanguage;
@@ -121,9 +197,10 @@ export function createApp({
 
 if (process.argv[1] === __filename) {
   const port = Number(process.env.PORT ?? 3000);
+  const host = process.env.HOST ?? DEFAULT_HOST;
   const app = createApp();
 
-  app.listen(port, () => {
-    console.log(`Translation PoC running at http://localhost:${port}`);
+  app.listen(port, host, () => {
+    console.log(`Translation PoC running at http://${host}:${port}`);
   });
 }

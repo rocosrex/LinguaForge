@@ -3,22 +3,32 @@ import http from "node:http";
 import test from "node:test";
 
 import {
+  DEFAULT_HOST,
   OPENAI_TRANSLATION_CLIENT_SECRETS_URL,
   createApp,
   normalizeTargetLanguage,
 } from "../server.js";
 
-function requestJson(app, { method = "POST", path = "/session", body } = {}) {
+function requestJson(
+  app,
+  { method = "POST", path = "/session", body, headers: extraHeaders } = {}
+) {
   return new Promise((resolve, reject) => {
     const server = app.listen(0, () => {
       const address = server.address();
       const payload = body === undefined ? undefined : JSON.stringify(body);
-      const headers = payload
+      const bodyHeaders = payload
         ? {
             "Content-Type": "application/json",
             "Content-Length": Buffer.byteLength(payload),
           }
         : {};
+      const headers = {
+        ...bodyHeaders,
+        ...(typeof extraHeaders === "function"
+          ? extraHeaders(address)
+          : extraHeaders),
+      };
 
       const req = http.request(
         {
@@ -56,6 +66,10 @@ function requestJson(app, { method = "POST", path = "/session", body } = {}) {
     });
   });
 }
+
+test("direct startup defaults to loopback host", () => {
+  assert.equal(DEFAULT_HOST, "127.0.0.1");
+});
 
 test("normalizeTargetLanguage defaults to Korean", () => {
   assert.equal(normalizeTargetLanguage(undefined), "ko");
@@ -282,4 +296,114 @@ test("POST /session returns a 502 when OpenAI fetch fails", async () => {
     error: "Failed to create OpenAI translation session",
   });
   assert.equal(loggedMessage, "Failed to create translation session");
+});
+
+test("POST /session rejects non-local Host before calling OpenAI", async () => {
+  let fetchCalled = false;
+  const app = createApp({
+    apiKey: "sk-test",
+    fetchImpl: async () => {
+      fetchCalled = true;
+      return Response.json({
+        value: "client-secret-test",
+      });
+    },
+  });
+
+  const response = await requestJson(app, {
+    headers: {
+      Host: "evil.example:3000",
+    },
+    body: {
+      targetLanguage: "ko",
+    },
+  });
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(response.body, {
+    error: "Forbidden: /session is only available from localhost",
+  });
+  assert.equal(fetchCalled, false);
+});
+
+test("POST /session allows localhost Host with port", async () => {
+  const app = createApp({
+    apiKey: "sk-test",
+    fetchImpl: async () =>
+      Response.json({
+        value: "client-secret-test",
+        expires_at: 1234567890,
+      }),
+  });
+
+  const response = await requestJson(app, {
+    headers: (address) => ({
+      Host: `localhost:${address.port}`,
+    }),
+    body: {
+      targetLanguage: "ko",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, {
+    value: "client-secret-test",
+    expires_at: 1234567890,
+  });
+});
+
+test("POST /session rejects non-local Origin before calling OpenAI", async () => {
+  let fetchCalled = false;
+  const app = createApp({
+    apiKey: "sk-test",
+    fetchImpl: async () => {
+      fetchCalled = true;
+      return Response.json({
+        value: "client-secret-test",
+      });
+    },
+  });
+
+  const response = await requestJson(app, {
+    headers: (address) => ({
+      Host: `localhost:${address.port}`,
+      Origin: "http://evil.example",
+    }),
+    body: {
+      targetLanguage: "ko",
+    },
+  });
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(response.body, {
+    error: "Forbidden: /session is only available from localhost",
+  });
+  assert.equal(fetchCalled, false);
+});
+
+test("POST /session allows localhost Origin with port", async () => {
+  const app = createApp({
+    apiKey: "sk-test",
+    fetchImpl: async () =>
+      Response.json({
+        value: "client-secret-test",
+        expires_at: 1234567890,
+      }),
+  });
+
+  const response = await requestJson(app, {
+    headers: (address) => ({
+      Host: `localhost:${address.port}`,
+      Origin: `http://localhost:${address.port}`,
+    }),
+    body: {
+      targetLanguage: "ko",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, {
+    value: "client-secret-test",
+    expires_at: 1234567890,
+  });
 });
