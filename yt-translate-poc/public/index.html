@@ -269,9 +269,11 @@
     }
 
     function setState(nextState, message) {
+      const activeStates = ["requesting-capture", "creating-session", "connecting", "translating"];
+
       session.state = nextState;
       startBtn.disabled = !["idle", "ended", "error"].includes(nextState);
-      stopBtn.disabled = nextState !== "translating";
+      stopBtn.disabled = !activeStates.includes(nextState);
       langSelect.disabled = !["idle", "ended", "error"].includes(nextState);
       downloadBtn.disabled = session.transcript.trim().length === 0;
 
