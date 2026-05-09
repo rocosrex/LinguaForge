@@ -96,3 +96,22 @@ test("index page exposes controls with expected semantics", async () => {
 
   assert.doesNotMatch(html, /--accent-strong\b/);
 });
+
+test("index page includes realtime translation client hooks", async () => {
+  const html = await readIndexHtml();
+  const requiredTokens = [
+    "suppressLocalAudioPlayback",
+    "RTCPeerConnection",
+    "createDataChannel(\"oai-events\")",
+    "realtime/translations/calls",
+    "SILENCE_TIMEOUT_MS",
+    "MAX_SESSION_MS",
+    "downloadMarkdown",
+    "startSilenceMonitor",
+    "stopSession",
+  ];
+
+  for (const token of requiredTokens) {
+    assert.match(html, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+});

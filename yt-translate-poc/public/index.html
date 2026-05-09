@@ -109,6 +109,16 @@
       font-size: 14px;
     }
 
+    .status.active {
+      color: #ccfbf1;
+      background: #115e59;
+    }
+
+    .status.error {
+      color: white;
+      background: #991b1b;
+    }
+
     label {
       display: inline-flex;
       gap: 8px;
@@ -210,8 +220,428 @@
   </main>
 
   <script>
-    document.getElementById("status").textContent =
-      "시작 버튼을 누른 뒤 YouTube 탭과 탭 오디오 공유를 선택하세요.";
+    const OPENAI_TRANSLATION_CALL_URL =
+      "https://api.openai.com/v1/realtime/translations/calls";
+    const TEST_MODE = new URLSearchParams(window.location.search).get("testMode") === "1";
+    const MAX_SESSION_MS = TEST_MODE ? 15000 : 120 * 60 * 1000;
+    const SILENCE_TIMEOUT_MS = TEST_MODE ? 5000 : 30 * 60 * 1000;
+    const SILENCE_CHECK_INTERVAL_MS = 1000;
+    const SILENCE_RMS_THRESHOLD = 0.012;
+
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const downloadBtn = document.getElementById("downloadBtn");
+    const langSelect = document.getElementById("lang");
+    const statusEl = document.getElementById("status");
+    const elapsedEl = document.getElementById("elapsed");
+    const originalVolume = document.getElementById("originalVolume");
+    const translatedVolume = document.getElementById("translatedVolume");
+    const subtitles = document.getElementById("subtitles");
+    const originalAudio = document.getElementById("originalAudio");
+    const translatedAudio = document.getElementById("translatedAudio");
+
+    const session = {
+      pc: null,
+      events: null,
+      sourceStream: null,
+      audioContext: null,
+      analyser: null,
+      analyserBuffer: null,
+      timers: {
+        elapsed: null,
+        maxSession: null,
+        silence: null,
+      },
+      lastSoundAt: null,
+      start: null,
+      end: null,
+      endReason: null,
+      transcript: "",
+      state: "idle",
+    };
+
+    function setStatus(message, { active = false, error = false } = {}) {
+      statusEl.textContent = message;
+      statusEl.classList.toggle("active", active);
+      statusEl.classList.toggle("error", error);
+    }
+
+    function setState(nextState, message) {
+      session.state = nextState;
+      startBtn.disabled = !["idle", "ended", "error"].includes(nextState);
+      stopBtn.disabled = nextState !== "translating";
+      langSelect.disabled = !["idle", "ended", "error"].includes(nextState);
+      downloadBtn.disabled = session.transcript.trim().length === 0;
+
+      setStatus(message, {
+        active: nextState === "translating",
+        error: nextState === "error",
+      });
+    }
+
+    function formatDuration(ms) {
+      const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+
+      if (hours > 0) {
+        return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+      }
+
+      return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    }
+
+    function updateElapsed() {
+      if (!session.start) {
+        elapsedEl.textContent = "00:00";
+        return;
+      }
+
+      const end = session.end ?? new Date();
+      elapsedEl.textContent = formatDuration(end.getTime() - session.start.getTime());
+    }
+
+    function setAudioVolumes() {
+      originalAudio.volume = Number(originalVolume.value);
+      translatedAudio.volume = Number(translatedVolume.value);
+    }
+
+    function appendCaption(delta) {
+      if (!delta) {
+        return;
+      }
+
+      session.transcript += delta;
+      subtitles.textContent = session.transcript;
+      subtitles.scrollTop = subtitles.scrollHeight;
+      downloadBtn.disabled = session.transcript.trim().length === 0;
+    }
+
+    function extractTranscriptDelta(event) {
+      if (typeof event?.delta !== "string") {
+        return "";
+      }
+
+      const type = event.type ?? "";
+      const isOutputTranscriptDelta =
+        type.includes("output_transcript") ||
+        (type.includes("output") && type.includes("transcript") && type.includes("delta"));
+
+      return isOutputTranscriptDelta ? event.delta : "";
+    }
+
+    function handleRealtimeEvent(rawData) {
+      try {
+        const event = JSON.parse(rawData);
+
+        if (event.type?.includes("error")) {
+          console.error("Realtime Translation event error", event);
+          return;
+        }
+
+        appendCaption(extractTranscriptDelta(event));
+      } catch (error) {
+        console.error("Failed to parse realtime event", error, rawData);
+      }
+    }
+
+    async function captureTabAudio() {
+      const preferredOptions = {
+        video: true,
+        audio: {
+          suppressLocalAudioPlayback: true,
+        },
+        preferCurrentTab: false,
+      };
+
+      try {
+        return await navigator.mediaDevices.getDisplayMedia(preferredOptions);
+      } catch (error) {
+        if (error instanceof TypeError) {
+          return navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: true,
+            preferCurrentTab: false,
+          });
+        }
+
+        throw error;
+      }
+    }
+
+    async function createClientSecret(targetLanguage) {
+      const response = await fetch("/session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ targetLanguage }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "세션 생성에 실패했습니다.");
+      }
+
+      const clientSecret = data.value ?? data.client_secret?.value;
+      if (!clientSecret) {
+        throw new Error("OpenAI client secret 응답이 비어 있습니다.");
+      }
+
+      return clientSecret;
+    }
+
+    async function connectWebRtc(audioTrack, stream, clientSecret) {
+      const pc = new RTCPeerConnection();
+      session.pc = pc;
+
+      pc.addTrack(audioTrack, stream);
+      session.events = pc.createDataChannel("oai-events");
+      session.events.onmessage = ({ data }) => handleRealtimeEvent(data);
+
+      pc.ontrack = ({ streams }) => {
+        translatedAudio.srcObject = streams[0];
+        translatedAudio.play().catch(() => {});
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const response = await fetch(OPENAI_TRANSLATION_CALL_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${clientSecret}`,
+          "Content-Type": "application/sdp",
+        },
+        body: offer.sdp,
+      });
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      await pc.setRemoteDescription({
+        type: "answer",
+        sdp: await response.text(),
+      });
+    }
+
+    function startElapsedTimer() {
+      clearInterval(session.timers.elapsed);
+      session.timers.elapsed = setInterval(updateElapsed, 1000);
+      updateElapsed();
+    }
+
+    function startMaxSessionTimer() {
+      clearTimeout(session.timers.maxSession);
+      session.timers.maxSession = setTimeout(() => {
+        stopSession("max-session-time");
+      }, MAX_SESSION_MS);
+    }
+
+    function startSilenceMonitor(audioTrack) {
+      const audioStream = new MediaStream([audioTrack]);
+      const AudioContextClass = window.AudioContext ?? window.webkitAudioContext;
+
+      if (!AudioContextClass) {
+        console.warn("AudioContext is unavailable; silence timeout is disabled.");
+        return;
+      }
+
+      session.audioContext = new AudioContextClass();
+      const source = session.audioContext.createMediaStreamSource(audioStream);
+      session.analyser = session.audioContext.createAnalyser();
+      session.analyser.fftSize = 2048;
+      source.connect(session.analyser);
+      session.analyserBuffer = new Uint8Array(session.analyser.fftSize);
+      session.lastSoundAt = Date.now();
+
+      clearInterval(session.timers.silence);
+      session.timers.silence = setInterval(() => {
+        session.analyser.getByteTimeDomainData(session.analyserBuffer);
+
+        let sum = 0;
+        for (const value of session.analyserBuffer) {
+          const normalized = (value - 128) / 128;
+          sum += normalized * normalized;
+        }
+
+        const rms = Math.sqrt(sum / session.analyserBuffer.length);
+        if (rms > SILENCE_RMS_THRESHOLD) {
+          session.lastSoundAt = Date.now();
+          return;
+        }
+
+        if (Date.now() - session.lastSoundAt >= SILENCE_TIMEOUT_MS) {
+          stopSession("silence-timeout");
+        }
+      }, SILENCE_CHECK_INTERVAL_MS);
+    }
+
+    function cleanupResources() {
+      clearInterval(session.timers.elapsed);
+      clearInterval(session.timers.silence);
+      clearTimeout(session.timers.maxSession);
+      session.timers.elapsed = null;
+      session.timers.silence = null;
+      session.timers.maxSession = null;
+
+      if (session.events) {
+        session.events.close();
+        session.events = null;
+      }
+
+      if (session.pc) {
+        session.pc.close();
+        session.pc = null;
+      }
+
+      if (session.sourceStream) {
+        session.sourceStream.getTracks().forEach((track) => track.stop());
+        session.sourceStream = null;
+      }
+
+      if (session.audioContext) {
+        session.audioContext.close().catch(() => {});
+        session.audioContext = null;
+      }
+
+      session.analyser = null;
+      session.analyserBuffer = null;
+      originalAudio.srcObject = null;
+      translatedAudio.srcObject = null;
+    }
+
+    function reasonLabel(reason) {
+      const labels = {
+        manual: "수동 종료",
+        "silence-timeout": "30분 무음 종료",
+        "max-session-time": "120분 최대 세션 종료",
+        "tab-ended": "탭 공유 종료",
+        error: "오류 종료",
+      };
+
+      return labels[reason] ?? reason;
+    }
+
+    function stopSession(reason = "manual") {
+      if (["idle", "ended"].includes(session.state)) {
+        return;
+      }
+
+      session.end = new Date();
+      session.endReason = reason;
+      cleanupResources();
+      updateElapsed();
+      setState("ended", reasonLabel(reason));
+    }
+
+    async function startSession() {
+      setAudioVolumes();
+      session.transcript = "";
+      session.start = null;
+      session.end = null;
+      session.endReason = null;
+      subtitles.textContent = "";
+      downloadBtn.disabled = true;
+
+      try {
+        setState("requesting-capture", "탭 오디오 요청 중");
+        const captureStream = await captureTabAudio();
+        const audioTrack = captureStream.getAudioTracks()[0];
+
+        if (!audioTrack) {
+          captureStream.getTracks().forEach((track) => track.stop());
+          throw new Error("Chrome 공유 창에서 탭 오디오 공유를 체크해야 합니다.");
+        }
+
+        captureStream.getVideoTracks().forEach((track) => track.stop());
+        const audioOnlyStream = new MediaStream([audioTrack]);
+        session.sourceStream = audioOnlyStream;
+        originalAudio.srcObject = audioOnlyStream;
+        originalAudio.play().catch(() => {});
+        audioTrack.onended = () => stopSession("tab-ended");
+
+        setState("creating-session", "OpenAI 세션 생성 중");
+        const clientSecret = await createClientSecret(langSelect.value);
+
+        setState("connecting", "WebRTC 연결 중");
+        await connectWebRtc(audioTrack, audioOnlyStream, clientSecret);
+
+        session.start = new Date();
+        startElapsedTimer();
+        startMaxSessionTimer();
+        startSilenceMonitor(audioTrack);
+        setState("translating", "통역 중");
+      } catch (error) {
+        console.error(error);
+        session.end = new Date();
+        session.endReason = "error";
+        cleanupResources();
+        updateElapsed();
+        setState("error", `오류: ${error.message}`);
+      }
+    }
+
+    function formatLocalTimestamp(date) {
+      const offsetMs = date.getTimezoneOffset() * 60 * 1000;
+      return new Date(date.getTime() - offsetMs).toISOString().slice(0, 19);
+    }
+
+    function buildMarkdown() {
+      const started = session.start ?? new Date();
+      const ended = session.end ?? new Date();
+      const duration = formatDuration(ended.getTime() - started.getTime());
+      const reason = session.endReason ?? "manual";
+      const transcript = session.transcript.trim() || "자막 내용이 없습니다.";
+
+      return [
+        "# YouTube Translation Session",
+        "",
+        `- Started: ${formatLocalTimestamp(started)}`,
+        `- Ended: ${formatLocalTimestamp(ended)}`,
+        `- Duration: ${duration}`,
+        `- Target language: ${langSelect.value}`,
+        `- End reason: ${reason}`,
+        "",
+        "## Korean Transcript",
+        "",
+        transcript,
+        "",
+      ].join("\n");
+    }
+
+    function downloadMarkdown() {
+      const markdown = buildMarkdown();
+      const timestamp = formatLocalTimestamp(session.start ?? new Date())
+        .replaceAll("-", "")
+        .replace("T", "-")
+        .replaceAll(":", "")
+        .slice(0, 13);
+      const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `youtube-translation-${timestamp}.md`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    startBtn.addEventListener("click", startSession);
+    stopBtn.addEventListener("click", () => stopSession("manual"));
+    downloadBtn.addEventListener("click", downloadMarkdown);
+    originalVolume.addEventListener("input", setAudioVolumes);
+    translatedVolume.addEventListener("input", setAudioVolumes);
+
+    setAudioVolumes();
+    setState(
+      "idle",
+      "시작 버튼을 누른 뒤 YouTube 탭과 탭 오디오 공유를 선택하세요."
+    );
   </script>
 </body>
 </html>
